@@ -154,6 +154,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         for (AppInfo a : apps) update(a);     // an install may just have finished
+        if (topStatus != null && !checking && System.currentTimeMillis() - lastCheck > 2 * 60 * 1000L) refresh();
     }
 
     private int dp(int v) {
@@ -273,6 +274,8 @@ public class MainActivity extends Activity {
                 label = "Reinstall latest";
             }
         }
+        if (pi != null) st += "\nInstalled on this phone: " + when(pi.lastUpdateTime);
+        if (a.checked && !a.failed && a.latestTime > 0) st += "\nLatest build on GitHub: " + when(a.latestTime);
         a.status.setText(st);
         a.main.setText(label);
         a.main.setEnabled(true);
@@ -291,7 +294,29 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------ network: list and latest releases
 
+    private volatile boolean checking = false;
+    private volatile long lastCheck = 0;
+
+    /** fallback when the GitHub API refuses (too many requests): the date of the file itself */
+    private long fileTime(String link) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(link).openConnection();
+        c.setRequestMethod("HEAD");
+        c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(12000);
+        c.setReadTimeout(12000);
+        c.setRequestProperty("User-Agent", UA);
+        int code = c.getResponseCode();
+        long t = c.getLastModified();
+        c.disconnect();
+        if (code != 200) throw new Exception("HTTP " + code);
+        if (t <= 0) throw new Exception("no date");
+        return t;
+    }
+
     private void refresh() {
+        if (checking) return;
+        checking = true;
+        lastCheck = System.currentTimeMillis();
         topStatus.setText("Checking for the latest versions…");
         new Thread(() -> {
             // 1. the app list (optional file on GitHub)
@@ -337,13 +362,27 @@ public class MainActivity extends Activity {
                     a.note = "";
                     ok++;
                 } catch (Throwable t) {
-                    a.failed = true;
                     String m = String.valueOf(t.getMessage());
-                    a.note = m.contains("404") ? "No release published yet." : "Could not check for updates.";
+                    boolean fixed = false;
+                    if (!m.contains("404")) {
+                        try {
+                            a.latestTime = fileTime("https://github.com/" + a.repo + "/releases/latest/download/" + a.apk);
+                            a.url = null;
+                            a.failed = false;
+                            a.note = "";
+                            ok++;
+                            fixed = true;
+                        } catch (Throwable t2) { }
+                    }
+                    if (!fixed) {
+                        a.failed = true;
+                        a.note = m.contains("404") ? "No release published yet." : "Could not check for updates (" + m + ").";
+                    }
                 }
                 a.checked = true;
                 runOnUiThread(() -> update(a));
             }
+            checking = false;
             final int done = ok;
             final int total = snapshot.size();
             runOnUiThread(() -> topStatus.setText(done == total
